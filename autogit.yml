@@ -1,0 +1,14 @@
+autogit:
+  tags:
+    github:
+      prefix: https://github.com/
+
+    bitbucket:
+      prefix: https://bitbucket.org/
+
+    kernel:
+      prefix: git://git.kernel.org/pub/scm/
+
+    kernel-alt:
+      prefix: https://kernel.googlesource.com/pub/scm/
+

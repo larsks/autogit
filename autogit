@@ -1,0 +1,185 @@
+#!/usr/bin/python
+
+import shlex
+import os
+import sys
+import subprocess
+import logging
+import argparse
+import yaml
+import sh
+import inspect
+import contextlib
+
+LOG = logging.getLogger(__name__)
+
+default_cfgfile = os.path.join(os.environ['HOME'],
+                               '.config',
+                               'autogit.yml')
+
+
+default_config = {
+    'repodir': os.path.join(os.environ['HOME'], 'repos'),
+    'tags': [],
+}
+
+
+class GitError (Exception):
+    '''An unexpected error has occurred'''
+
+    def __str__(self):
+        return inspect.getdoc(self).format(message=self.message)
+
+
+class ConfigurationError (GitError):
+    '''There is a problem with the autogit configuration: {message}'''
+
+
+class InvalidRepository (GitError):
+    '''Invalid repository name: {message}'''
+
+
+class InvalidRepositoryTag (GitError):
+    '''Invalid repository tag: {message}'''
+
+
+class InvalidCommand (GitError):
+    '''Invalid command: {message}'''
+
+
+class RepositoryCreateFailed (GitError):
+    '''Failed to create repository {message}'''
+
+
+class NoCommand (GitError):
+    '''You have authenticated successfully but this account does not permit
+    shell access.'''
+
+
+@contextlib.contextmanager
+def change_directory(dir):
+    cwd = os.path.abspath(os.getcwd())
+    os.chdir(dir)
+    yield
+    os.chdir(cwd)
+
+
+class Autogit (object):
+    commands = (
+        'git-upload-pack',
+        'git-receive-pack',
+    )
+
+    def __init__(self, config=None):
+        self.init_config(config)
+
+    def init_config(self, config):
+        self.config = default_config
+        self.config.update(config)
+
+    def repopath(self, repo):
+        return os.path.join(self.config['repodir'], repo)
+
+    def repo_exists(self, repo):
+        return os.path.isdir(self.repopath(repo))
+
+    def validate_repo(self, repo):
+        tag, path = repo.split('/', 1)
+        if tag not in self.config['tags']:
+            raise InvalidRepositoryTag(tag)
+
+        if not repo.endswith('.git'):
+            raise InvalidRepository(repo)
+
+        return repo, tag, path
+
+    def create_repo(self, repo, tag, path):
+        LOG.info('creating new repository %s',
+                 repo)
+
+        url = self.config['tags'][tag]['prefix'] + path
+        LOG.debug('mapped repository %s to url %s',
+                 repo,
+                 url)
+
+        try:
+            sh.git('clone', '--mirror', url, repo, _out=sys.stderr)
+        except sh.ErrorReturnCode as err:
+            raise RepositoryCreateFailed(err)
+
+    def update_repo(self, repo, tag, path):
+        LOG.info('updating existing repository %s',
+                 repo)
+
+        with change_directory(repo):
+            sh.git('remote', 'update', _out=sys.stderr)
+
+    def run(self):
+        try:
+            if not os.path.isdir(self.config['repodir']):
+                raise ConfigurationError('invalid repository directory')
+
+            os.chdir(self.config['repodir'])
+
+            if 'SSH_ORIGINAL_COMMAND' not in os.environ:
+                raise NoCommand()
+
+            cmd = os.environ['SSH_ORIGINAL_COMMAND']
+            cmdvec = shlex.split(cmd)
+
+            LOG.debug('handling command: %s (from: %s)',
+                      cmdvec, cmd)
+
+            if cmdvec[0] not in self.commands:
+                raise InvalidCommand(cmdvec[0])
+
+            repo, tag, path = self.validate_repo(cmdvec[1])
+
+            if self.repo_exists(repo):
+                self.update_repo(repo, tag, path)
+            else:
+                self.create_repo(repo, tag, path)
+
+            os.execvp(cmdvec[0], cmdvec)
+
+        except GitError as err:
+            LOG.error(str(err))
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument('--verbose', '-v',
+                   action='store_const',
+                   const='INFO',
+                   dest='loglevel')
+    p.add_argument('--debug', '-d',
+                   action='store_const',
+                   const='DEBUG',
+                   dest='loglevel')
+
+    p.add_argument('--config', '-f',
+                   default=default_cfgfile)
+    p.add_argument('--repodir', '-r')
+
+    p.set_defaults(loglevel='WARN')
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    logging.basicConfig(
+        level=args.loglevel)
+
+    config = {}
+    config.update(default_config)
+    with open(args.config) as fd:
+        config.update(yaml.load(fd).get('autogit', {}))
+
+    if args.repodir:
+        config['repodir'] = args.repodir
+
+    app = Autogit(config=config)
+    app.run()
+
+if __name__ == '__main__':
+    main()
